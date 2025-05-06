@@ -1,0 +1,187 @@
+I'll write a Python script that uses DBSCAN (Density-Based Spatial Clustering of Applications with Noise) to analyze URIs and status codes to identify anomalies. This is a common approach in web log analysis and security monitoring.
+
+```python
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
+from urllib.parse import urlparse
+import hashlib
+
+def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
+    """
+    Analyze URI patterns and status codes to identify anomalies using DBSCAN.
+    
+    Parameters:
+    -----------
+    log_file_path : str
+        Path to the log file containing URI and status code data
+    eps : float
+        The maximum distance between two samples for one to be considered 
+        as in the neighborhood of the other
+    min_samples : int
+        The number of samples in a neighborhood for a point to be considered 
+        as a core point
+        
+    Returns:
+    --------
+    DataFrame with original data and anomaly labels
+    """
+    # Load data
+    print(f"Loading data from {log_file_path}...")
+    try:
+        # Assuming a CSV format with at least 'uri' and 'status_code' columns
+        df = pd.read_csv(log_file_path)
+        
+        if 'uri' not in df.columns or 'status_code' not in df.columns:
+            print("Error: Input file must contain 'uri' and 'status_code' columns.")
+            return None
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return None
+    
+    print(f"Loaded {len(df)} records.")
+    
+    # Feature extraction from URIs
+    print("Extracting features from URIs...")
+    
+    # Extract URI components
+    df['path'] = df['uri'].apply(lambda x: urlparse(x).path)
+    df['query'] = df['uri'].apply(lambda x: urlparse(x).query)
+    df['path_length'] = df['path'].apply(len)
+    df['query_length'] = df['query'].apply(len)
+    df['path_depth'] = df['path'].apply(lambda x: x.count('/'))
+    
+    # Create a hash of the path pattern (replace numbers with 'N' first)
+    def normalize_path(path):
+        # Replace numeric segments with 'N'
+        parts = path.split('/')
+        normalized_parts = []
+        for part in parts:
+            if part.isdigit():
+                normalized_parts.append('N')
+            else:
+                normalized_parts.append(part)
+        return '/'.join(normalized_parts)
+    
+    df['normalized_path'] = df['path'].apply(normalize_path)
+    
+    # Create a hash of the normalized path to use as a numeric feature
+    df['path_hash'] = df['normalized_path'].apply(
+        lambda x: int(hashlib.md5(x.encode()).hexdigest(), 16) % 10**8
+    )
+    
+    # Prepare features for clustering
+    print("Preparing features for clustering...")
+    features = df[['status_code', 'path_length', 'query_length', 'path_depth', 'path_hash']].copy()
+    
+    # Scale features
+    scaler = StandardScaler()
+    scaled_features = scaler.fit_transform(features)
+    
+    # Apply DBSCAN
+    print(f"Applying DBSCAN with eps={eps}, min_samples={min_samples}...")
+    db = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
+    clusters = db.fit_predict(scaled_features)
+    
+    # Add cluster information to dataframe
+    df['cluster'] = clusters
+    
+    # Identify anomalies (points labeled as -1)
+    anomalies = df[df['cluster'] == -1]
+    print(f"Found {len(anomalies)} anomalies out of {len(df)} records ({len(anomalies)/len(df)*100:.2f}%).")
+    
+    # Analyze clusters
+    cluster_stats = df.groupby('cluster').agg({
+        'status_code': ['count', 'mean', 'std'],
+        'path_length': ['mean', 'std'],
+        'query_length': ['mean', 'std']
+    })
+    
+    print("\nCluster statistics:")
+    print(cluster_stats)
+    
+    # Plot results
+    plt.figure(figsize=(12, 8))
+    
+    # Create a scatter plot of status code vs path length
+    plt.scatter(
+        df[df['cluster'] != -1]['path_length'], 
+        df[df['cluster'] != -1]['status_code'],
+        c=df[df['cluster'] != -1]['cluster'], 
+        cmap='viridis', 
+        marker='o',
+        alpha=0.6,
+        label='Normal'
+    )
+    
+    # Plot anomalies in red
+    plt.scatter(
+        df[df['cluster'] == -1]['path_length'], 
+        df[df['cluster'] == -1]['status_code'],
+        color='red', 
+        marker='x', 
+        s=100,
+        label='Anomalies'
+    )
+    
+    plt.title('URI Anomalies Detection using DBSCAN')
+    plt.xlabel('Path Length')
+    plt.ylabel('Status Code')
+    plt.colorbar(label='Cluster')
+    plt.legend()
+    plt.tight_layout()
+    
+    # Save plot
+    plot_file = log_file_path.replace('.csv', '_anomalies_plot.png')
+    plt.savefig(plot_file)
+    print(f"Plot saved to {plot_file}")
+    
+    # Save results
+    output_file = log_file_path.replace('.csv', '_anomalies.csv')
+    anomalies.to_csv(output_file, index=False)
+    print(f"Anomalies saved to {output_file}")
+    
+    return df
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Analyze URI and status codes for anomalies using DBSCAN')
+    parser.add_argument('log_file', help='Path to the log file containing URI and status code data')
+    parser.add_argument('--eps', type=float, default=0.5, help='DBSCAN eps parameter')
+    parser.add_argument('--min-samples', type=int, default=5, help='DBSCAN min_samples parameter')
+    
+    args = parser.parse_args()
+    
+    result = analyze_uri_status_codes(args.log_file, args.eps, args.min_samples)
+    
+    if result is not None:
+        print("\nAnalysis completed successfully.")
+
+if __name__ == "__main__":
+    main()
+```
+
+This script:
+
+1. Reads a CSV file containing URI and status code data
+2. Extracts features from the URIs:
+   - Path length
+   - Query length
+   - Path depth (number of directories)
+   - Normalized path hash (to cluster similar path patterns)
+3. Uses DBSCAN to cluster the data based on these features
+4. Identifies anomalies (points that don't belong to any cluster)
+5. Generates visualizations and statistics about the clusters
+6. Saves the anomalies to a CSV file for further analysis
+
+To use this script:
+```
+python uri_anomaly_detector.py path/to/your/logfile.csv --eps 0.5 --min-samples 5
+```
+
+You can adjust the `eps` and `min-samples` parameters to tune the sensitivity of the anomaly detection. Lower `eps` values and higher `min-samples` values will result in more points being classified as anomalies.
+
+Would you like me to explain any specific part of this code in more detail?​​​​​​​​​​​​​​​​
