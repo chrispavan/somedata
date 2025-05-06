@@ -1,20 +1,23 @@
-python
+I'll modify the Python script to include request method and referrer in the DBSCAN analysis. These are important features that can help identify suspicious patterns and anomalies in web traffic.
+
+```python
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.cluster import DBSCAN
 import matplotlib.pyplot as plt
 from urllib.parse import urlparse
 import hashlib
+from scipy.sparse import hstack
 
 def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
     """
-    Analyze URI patterns and status codes to identify anomalies using DBSCAN.
+    Analyze URI patterns, status codes, request methods, and referrers to identify anomalies using DBSCAN.
     
     Parameters:
     -----------
     log_file_path : str
-        Path to the log file containing URI and status code data
+        Path to the log file containing URI, status code, method, and referrer data
     eps : float
         The maximum distance between two samples for one to be considered 
         as in the neighborhood of the other
@@ -29,11 +32,14 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
     # Load data
     print(f"Loading data from {log_file_path}...")
     try:
-        # Assuming a CSV format with at least 'uri' and 'status_code' columns
+        # Assuming a CSV format with required columns
         df = pd.read_csv(log_file_path)
         
-        if 'uri' not in df.columns or 'status_code' not in df.columns:
-            print("Error: Input file must contain 'uri' and 'status_code' columns.")
+        required_columns = ['uri', 'status_code', 'method', 'referrer']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            print(f"Error: Input file missing required columns: {', '.join(missing_columns)}")
             return None
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -42,7 +48,7 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
     print(f"Loaded {len(df)} records.")
     
     # Feature extraction from URIs
-    print("Extracting features from URIs...")
+    print("Extracting features from URIs and referrers...")
     
     # Extract URI components
     df['path'] = df['uri'].apply(lambda x: urlparse(x).path)
@@ -51,7 +57,18 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
     df['query_length'] = df['query'].apply(len)
     df['path_depth'] = df['path'].apply(lambda x: x.count('/'))
     
-    # Create a hash of the path pattern (replace numbers with 'N' first)
+    # Extract referrer components
+    df['referrer_domain'] = df['referrer'].apply(
+        lambda x: urlparse(x).netloc if pd.notnull(x) and x != '' else 'none'
+    )
+    df['is_internal_referrer'] = df['referrer'].apply(
+        lambda x: 1 if pd.notnull(x) and x != '' and urlparse(x).netloc == urlparse(df['uri'].iloc[0]).netloc else 0
+    )
+    df['has_referrer'] = df['referrer'].apply(
+        lambda x: 1 if pd.notnull(x) and x != '' else 0
+    )
+    
+    # Create a hash of the path pattern (replace numbers with 'N')
     def normalize_path(path):
         # Replace numeric segments with 'N'
         parts = path.split('/')
@@ -72,16 +89,29 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
     
     # Prepare features for clustering
     print("Preparing features for clustering...")
-    features = df[['status_code', 'path_length', 'query_length', 'path_depth', 'path_hash']].copy()
     
-    # Scale features
+    # Numerical features
+    num_features = df[['status_code', 'path_length', 'query_length', 'path_depth', 'path_hash', 
+                       'is_internal_referrer', 'has_referrer']].copy()
+    
+    # Scale numerical features
     scaler = StandardScaler()
-    scaled_features = scaler.fit_transform(features)
+    scaled_num_features = scaler.fit_transform(num_features)
+    
+    # Categorical features: method and referrer_domain
+    cat_features = df[['method', 'referrer_domain']].copy()
+    
+    # One-hot encode categorical features
+    encoder = OneHotEncoder(sparse_output=True, handle_unknown='ignore')
+    encoded_cat_features = encoder.fit_transform(cat_features)
+    
+    # Combine numerical and categorical features
+    features = hstack([scaled_num_features, encoded_cat_features])
     
     # Apply DBSCAN
     print(f"Applying DBSCAN with eps={eps}, min_samples={min_samples}...")
-    db = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
-    clusters = db.fit_predict(scaled_features)
+    db = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1, metric='euclidean')
+    clusters = db.fit_predict(features)
     
     # Add cluster information to dataframe
     df['cluster'] = clusters
@@ -94,16 +124,43 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
     cluster_stats = df.groupby('cluster').agg({
         'status_code': ['count', 'mean', 'std'],
         'path_length': ['mean', 'std'],
-        'query_length': ['mean', 'std']
+        'query_length': ['mean', 'std'],
+        'method': lambda x: x.value_counts().index[0] if len(x.value_counts()) > 0 else 'N/A',
+        'is_internal_referrer': ['mean']
     })
     
     print("\nCluster statistics:")
     print(cluster_stats)
     
-    # Plot results
-    plt.figure(figsize=(12, 8))
+    # Most common anomalous patterns
+    print("\nTop anomalous request methods:")
+    print(anomalies['method'].value_counts().head(5))
     
-    # Create a scatter plot of status code vs path length
+    print("\nTop anomalous status codes:")
+    print(anomalies['status_code'].value_counts().head(5))
+    
+    print("\nTop anomalous referrer domains:")
+    print(anomalies['referrer_domain'].value_counts().head(5))
+    
+    # Plot results - Multiple visualizations for better analysis
+    create_visualizations(df, log_file_path)
+    
+    # Save results
+    output_file = log_file_path.replace('.csv', '_anomalies.csv')
+    anomalies.to_csv(output_file, index=False)
+    print(f"Anomalies saved to {output_file}")
+    
+    return df
+
+def create_visualizations(df, log_file_path):
+    """Create multiple visualizations to analyze anomalies"""
+    # Create a directory for plots
+    import os
+    plots_dir = os.path.join(os.path.dirname(log_file_path), 'anomaly_plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # 1. Status Code vs Path Length
+    plt.figure(figsize=(12, 8))
     plt.scatter(
         df[df['cluster'] != -1]['path_length'], 
         df[df['cluster'] != -1]['status_code'],
@@ -113,8 +170,6 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
         alpha=0.6,
         label='Normal'
     )
-    
-    # Plot anomalies in red
     plt.scatter(
         df[df['cluster'] == -1]['path_length'], 
         df[df['cluster'] == -1]['status_code'],
@@ -123,31 +178,96 @@ def analyze_uri_status_codes(log_file_path, eps=0.5, min_samples=5):
         s=100,
         label='Anomalies'
     )
-    
-    plt.title('URI Anomalies Detection using DBSCAN')
+    plt.title('URI Anomalies: Status Code vs Path Length')
     plt.xlabel('Path Length')
     plt.ylabel('Status Code')
     plt.colorbar(label='Cluster')
     plt.legend()
     plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'status_vs_path.png'))
     
-    # Save plot
-    plot_file = log_file_path.replace('.csv', '_anomalies_plot.png')
-    plt.savefig(plot_file)
-    print(f"Plot saved to {plot_file}")
+    # 2. Method distribution among anomalies and normal requests
+    plt.figure(figsize=(14, 6))
     
-    # Save results
-    output_file = log_file_path.replace('.csv', '_anomalies.csv')
-    anomalies.to_csv(output_file, index=False)
-    print(f"Anomalies saved to {output_file}")
+    # Create a DataFrame with method counts for normal and anomalous requests
+    method_counts = pd.DataFrame({
+        'Normal': df[df['cluster'] != -1]['method'].value_counts(),
+        'Anomaly': df[df['cluster'] == -1]['method'].value_counts()
+    }).fillna(0)
     
-    return df
+    method_counts.plot(kind='bar', ax=plt.gca())
+    plt.title('HTTP Methods: Normal vs Anomalous Requests')
+    plt.xlabel('HTTP Method')
+    plt.ylabel('Count')
+    plt.yscale('log')  # Log scale often works better for this type of data
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'method_distribution.png'))
+    
+    # 3. Referrer presence vs Status Code
+    plt.figure(figsize=(12, 8))
+    plt.scatter(
+        df[df['cluster'] != -1]['has_referrer'], 
+        df[df['cluster'] != -1]['status_code'],
+        c=df[df['cluster'] != -1]['cluster'], 
+        cmap='viridis', 
+        marker='o',
+        alpha=0.5,
+        label='Normal'
+    )
+    plt.scatter(
+        df[df['cluster'] == -1]['has_referrer'], 
+        df[df['cluster'] == -1]['status_code'],
+        color='red', 
+        marker='x', 
+        s=100,
+        label='Anomalies'
+    )
+    plt.title('Referrer Presence vs Status Code')
+    plt.xlabel('Has Referrer')
+    plt.ylabel('Status Code')
+    plt.xticks([0, 1], ['No', 'Yes'])
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'referrer_vs_status.png'))
+    
+    # 4. Method vs Status Code (colored by anomaly)
+    plt.figure(figsize=(12, 8))
+    
+    # Convert methods to numeric for plotting
+    method_mapping = {method: i for i, method in enumerate(df['method'].unique())}
+    df['method_numeric'] = df['method'].map(method_mapping)
+    
+    plt.scatter(
+        df[df['cluster'] != -1]['method_numeric'], 
+        df[df['cluster'] != -1]['status_code'],
+        c='blue', 
+        marker='o',
+        alpha=0.3,
+        label='Normal'
+    )
+    plt.scatter(
+        df[df['cluster'] == -1]['method_numeric'], 
+        df[df['cluster'] == -1]['status_code'],
+        color='red', 
+        marker='x', 
+        s=100,
+        label='Anomalies'
+    )
+    plt.title('HTTP Method vs Status Code')
+    plt.xlabel('HTTP Method')
+    plt.ylabel('Status Code')
+    plt.xticks(list(method_mapping.values()), list(method_mapping.keys()), rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'method_vs_status.png'))
+    
+    print(f"Visualizations saved to {plots_dir}")
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='Analyze URI and status codes for anomalies using DBSCAN')
-    parser.add_argument('log_file', help='Path to the log file containing URI and status code data')
+    parser = argparse.ArgumentParser(description='Analyze URI patterns, status codes, request methods, and referrers for anomalies using DBSCAN')
+    parser.add_argument('log_file', help='Path to the log file containing URI, status code, method, and referrer data')
     parser.add_argument('--eps', type=float, default=0.5, help='DBSCAN eps parameter')
     parser.add_argument('--min-samples', type=int, default=5, help='DBSCAN min_samples parameter')
     
@@ -157,6 +277,36 @@ def main():
     
     if result is not None:
         print("\nAnalysis completed successfully.")
+        print("Check the 'anomaly_plots' directory for visualizations.")
 
 if __name__ == "__main__":
     main()
+```
+
+This enhanced script now:
+
+1. Includes request method and referrer as features for anomaly detection
+2. Extracts meaningful features from referrers:
+   - Referrer domain
+   - Whether the referrer is internal or external
+   - Whether a referrer exists at all
+3. Properly handles categorical features (method and referrer domain) with one-hot encoding
+4. Creates multiple visualizations to help analyze the anomalies:
+   - Status code vs path length (original plot)
+   - HTTP method distribution comparison between normal and anomalous requests
+   - Referrer presence vs status code
+   - HTTP method vs status code
+5. Saves all visualizations to a dedicated directory for easier analysis
+6. Provides additional statistics about anomalies, including top anomalous methods and referrer domains
+
+The script now takes into account common attack patterns that might be evident in method/referrer combinations, such as:
+- Unusual HTTP methods (like TRACE, CONNECT) from external referrers
+- Missing referrers for specific status codes
+- Unusual referrer domains for specific paths
+
+To use this script:
+```
+python uri_anomaly_detector.py path/to/your/logfile.csv --eps 0.5 --min-samples 5
+```
+
+The input CSV should have at least these columns: `uri`, `status_code`, `method`, and `referrer`.​​​​​​​​​​​​​​​​
